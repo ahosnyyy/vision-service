@@ -1,10 +1,17 @@
+# Recorder Configuration File
+# This file contains all settings for the recorder service
+
 recorder:
   camera_index: 0            # which camera to use
-  fps: 30                    # target capture fps
   resolution:
     width: 1280
     height: 720
   image_format: "jpg"        # jpg / png
-  output_dir: "./frames"     # where to store raw frames
-  buffer_size: 100           # max number of frames in memory buffer
+  output_dir: "./frames"       # where to store raw frames (inside recorder directory)
   keep_disk_copy: true      # whether to save every frame to disk or not
+
+# Logging configuration for recorder
+logging:
+  level: "WARNING"  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"  # Format with timestamp and level
+  file: null           # No log file

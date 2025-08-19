@@ -8,6 +8,7 @@ Client class for communicating with the FastAPI detection service.
 import requests
 import json
 import time
+import os
 from typing import Optional, Dict, Any, List
 from pathlib import Path
 import logging
@@ -24,7 +25,11 @@ class DetectorClient:
     def __init__(self, config_path: str = "detector/config.yaml"):
         """Initialize the detector client."""
         self.config = load_config(config_path)
-        self.logger = setup_logging("detector_client")
+        
+        # Get logging configuration
+        log_level = self.config.get("logging", {}).get("level", "WARNING")
+        log_file = self.config.get("logging", {}).get("file")
+        self.logger = setup_logging("detector_client", log_level, log_file)
         
         # API configuration
         # Always connect to localhost, regardless of server binding
@@ -44,6 +49,7 @@ class DetectorClient:
         self.running = False
         self.last_health_check = 0
         self.health_check_interval = 30  # seconds
+        self.frame_count = 0  # Counter for processed frames
         
         self.logger.info(f"Detector client initialized for {self.api_base_url}")
     
@@ -97,12 +103,13 @@ class DetectorClient:
             self.logger.debug(f"Health check failed: {e}")
             return False
     
-    def detect_frame(self, frame_data) -> Optional[Dict[str, Any]]:
+    def detect_frame(self, frame_data, frame_name: str = None) -> Optional[Dict[str, Any]]:
         """
         Send a frame to the detection service for processing.
         
         Args:
             frame_data: Frame data (PIL Image, numpy array, or bytes)
+            frame_name: Optional name for the frame (for JSON naming)
             
         Returns:
             Detection results or None if failed
@@ -134,7 +141,10 @@ class DetectorClient:
                 return None
             
             # Prepare the request
-            files = {'file': ('frame.jpg', img_bytes, 'image/jpeg')}
+            filename = frame_name if frame_name else 'frame.jpg'
+            files = {'file': (filename, img_bytes, 'image/jpeg')}
+            
+            # Include frame_name in the form data as well to ensure it's passed correctly
             data = {
                 'onnx_file': self.onnx_file,
                 'img_size': self.img_size,
@@ -143,8 +153,11 @@ class DetectorClient:
                 'categories_file': self.categories_file
             }
             
+            # Add frame_name to form data if provided
+            if frame_name:
+                data['frame_name'] = frame_name
+            
             # Make the API request
-            self.logger.debug("Sending frame to detection service...")
             response = requests.post(
                 f"{self.api_base_url}/detect",
                 files=files,
@@ -154,10 +167,15 @@ class DetectorClient:
             
             if response.status_code == 200:
                 result = response.json()
-                self.logger.debug(f"Detection successful: {len(result.get('detections', []))} objects found")
+                detection_count = len(result.get('detections', []))
+                # Increment frame count
+                self.frame_count += 1
+                # Only log every 10th frame to reduce log volume
+                if self.frame_count % 10 == 0:
+                    self.logger.info(f"{detection_count} objects in frame {self.frame_count}")
                 return result
             else:
-                self.logger.error(f"Detection failed with status {response.status_code}: {response.text}")
+                self.logger.error(f"Detection failed: {response.status_code}")
                 return None
                 
         except requests.exceptions.Timeout:
@@ -206,8 +224,8 @@ class Detector:
     def is_ready(self) -> bool:
         return self.client.is_ready()
     
-    def detect_frame(self, frame_data) -> Optional[Dict[str, Any]]:
-        return self.client.detect_frame(frame_data)
+    def detect_frame(self, frame_data, frame_name: str = None) -> Optional[Dict[str, Any]]:
+        return self.client.detect_frame(frame_data, frame_name)
     
     def get_status(self) -> Dict[str, Any]:
         return self.client.get_status()

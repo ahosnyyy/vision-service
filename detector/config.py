@@ -36,6 +36,7 @@ class LoggingConfig(BaseModel):
     level: str = Field(default="INFO", description="Log level")
     enable_console: bool = Field(default=True, description="Enable console logging")
     enable_file: bool = Field(default=False, description="Enable file logging")
+    file: str = Field(default="./logs/detector.log", description="Log file path")
 
 class SaveResultsConfig(BaseModel):
     """Detection results saving configuration"""
@@ -57,7 +58,11 @@ class DetectorConfig(BaseModel):
         """Load configuration from YAML file"""
         try:
             import yaml
-            with open(yaml_file, 'r') as f:
+            # Get detector directory for relative path resolution
+            detector_dir = os.path.dirname(os.path.abspath(__file__))
+            config_path = os.path.join(detector_dir, yaml_file)
+            
+            with open(config_path, 'r') as f:
                 data = yaml.safe_load(f)
             return cls(**data)
         except Exception as e:

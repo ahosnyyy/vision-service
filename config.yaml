@@ -1,43 +1,32 @@
-# Vision Service Configuration
+# Vision Service Coordinator Configuration
 
-# Frame processing settings
-detection_interval: 10      # Process every Nth frame
-buffer_size: 100           # Maximum frames in buffer
-processing_delay: 0.1      # Delay between processing cycles (seconds)
+# Coordinator settings
+# detection_interval removed - now using detector.fps instead
+buffer_size: 500           # Maximum frames in shared buffer
+processing_delay: 0      # Delay between processing cycles (seconds)
 
-# Service configuration paths
-recorder_config: "recorder/config.yaml"
-detector_config: "detector/config.yaml"
+# Recorder settings
+recorder:
+  fps: 10                  # Target capture FPS for recorder
 
-# Logging configuration
-logging:
-  level: "INFO"
-  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-  file: "logs/vision_service.log"
+# Detector settings
+detector:
+  fps: 1                   # Detection FPS (frames per second)
+
+# Service startup settings
+startup:
+  recorder_startup_delay: 2.0    # Seconds to wait after starting recorder
+  detector_startup_delay: 3.0    # Seconds to wait after starting detector
+  max_startup_retries: 3         # Maximum retries for service startup
 
 # Performance settings
 performance:
-  max_workers: 4           # Maximum worker threads
-  queue_timeout: 1.0       # Queue operation timeout (seconds)
-  retry_attempts: 3        # Number of retry attempts for failed operations
+  max_workers: 4                 # Maximum worker threads
+  queue_timeout: 5.0             # Queue operation timeout (seconds)
+  retry_attempts: 3              # Number of retry attempts for failed operations
 
-# Buffer management
-buffer:
-  type: "deque"            # "deque" or "queue"
-  max_size: 100           # Maximum buffer size
-  drop_oldest: true       # Drop oldest frames when buffer is full
-  timeout: 1.0            # Buffer operation timeout
-
-# Detection settings
-detection:
-  batch_size: 1            # Process frames in batches
-  confidence_threshold: 0.5 # Minimum confidence for detections
-  save_detections: true    # Save detection results
-  detection_format: "json" # Output format for detections
-
-# Recording settings
-recording:
-  fps: 30                  # Target frames per second
-  quality: 85              # JPEG quality (0-100)
-  save_frames: false       # Save individual frames
-  frame_format: "jpg"      # Frame format
+# Logging configuration for coordinator
+logging:
+  level: "WARNING"  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"  # Format with timestamp and level
+  file: null           # No log file

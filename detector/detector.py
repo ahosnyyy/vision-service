@@ -22,6 +22,56 @@ from datetime import datetime
 from config import config
 from clo_processor import map_detections_to_clo
 
+# Setup logging for detector service
+import logging
+import os
+
+def setup_detector_logging():
+    """Setup logging for the detector service with relative paths."""
+    # Get detector directory for relative path resolution
+    detector_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Configure logging
+    log_level = getattr(logging, config.logging.level.upper(), logging.INFO)
+    
+    # Create formatter
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    # Setup root logger
+    logger = logging.getLogger()
+    logger.setLevel(log_level)
+    
+    # Clear existing handlers
+    logger.handlers.clear()
+    
+    # Console handler
+    if config.logging.enable_console:
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(log_level)
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+    
+    # File handler - only create if file logging is explicitly enabled
+    if config.logging.enable_file and config.logging.file and config.logging.file is not None:
+        # Resolve log file path relative to detector directory
+        log_file_path = os.path.join(detector_dir, config.logging.file)
+        
+        # Only create log directory if file logging is enabled
+        log_dir = os.path.dirname(log_file_path)
+        os.makedirs(log_dir, exist_ok=True)
+        
+        file_handler = logging.FileHandler(log_file_path)
+        file_handler.setLevel(log_level)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+    
+    return logger
+
+# Setup logging
+detector_logger = setup_detector_logging()
+
 
 
 # Initialize FastAPI app
@@ -53,30 +103,56 @@ model_session = None
 class_names = []
 
 def save_detection_result(result: InferenceResponse, image_source: str = "unknown") -> Optional[str]:
-    """
-    Save detection result to JSON file
+    """Save detection result to JSON file in a date-based folder
     
     Args:
-        result: The detection result to save
-        image_source: Source of the image (filename or description)
+        result: Detection result to save
+        image_source: Source image name or identifier
         
     Returns:
-        Path to saved file if successful, None if saving is disabled
+        Path to saved file or None if saving failed
     """
+    # Check if saving is enabled in config
     if not config.save_results.enabled:
+        detector_logger.warning("Saving detection results is disabled in config")
         return None
     
     try:
-        # Generate filename with just image name
-        if image_source and image_source != "unknown":
-            # Remove file extension and add .json
-            base_name = os.path.splitext(image_source)[0]
-            filename = f"{base_name}.json"
+        # Get detector directory for relative path resolution
+        detector_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        # Generate filename from image source
+        base_name = os.path.splitext(os.path.basename(image_source))[0]
+        filename = f"{base_name}.json"
+        
+        # Get current date for folder name
+        current_date = datetime.now().strftime("%Y%m%d")
+        
+        # Resolve output directory path based on config
+        config_output_dir = config.save_results.output_dir
+        
+        # Handle different path formats
+        if config_output_dir.startswith('./'):
+            # Relative to detector directory
+            base_output_dir = os.path.join(detector_dir, config_output_dir[2:])
+        elif '/' not in config_output_dir and '\\' not in config_output_dir:
+            # Just a directory name, make it relative to detector dir
+            base_output_dir = os.path.join(detector_dir, config_output_dir)
+        elif config_output_dir.startswith('detector/'):
+            # Remove 'detector/' prefix and make relative to detector dir
+            base_output_dir = os.path.join(detector_dir, config_output_dir[9:])
         else:
-            filename = "unknown.json"
+            # Use as is (absolute path or other relative path)
+            base_output_dir = config_output_dir
+        
+        # Create date-based directory inside output directory
+        output_dir = os.path.join(base_output_dir, current_date)
+        
+        # Ensure output directory exists
+        os.makedirs(output_dir, exist_ok=True)
         
         # Create full file path
-        file_path = os.path.join(config.save_results.output_dir, filename)
+        file_path = os.path.join(output_dir, filename)
         
         # Prepare data for saving
         save_data = {
@@ -96,11 +172,11 @@ def save_detection_result(result: InferenceResponse, image_source: str = "unknow
         with open(file_path, 'w', encoding='utf-8') as f:
             json.dump(save_data, f, indent=2, ensure_ascii=False)
         
-        print(f"Detection result saved to: {file_path}")
+        detector_logger.info(f"Detection: {os.path.basename(file_path)} ({len(result.detections)} objects)")
         return file_path
         
     except Exception as e:
-        print(f"Error saving detection result: {e}")
+        detector_logger.error(f"Error saving detection result: {e}")
         return None
 
 # Load class names from YAML file
@@ -123,7 +199,7 @@ def load_class_names(yaml_file):
             
         return labels
     except Exception as e:
-        print(f"Error loading labels from {yaml_file}: {e}")
+        detector_logger.error(f"Error loading labels from {yaml_file}: {e}")
         return []
 
 # Load ONNX model
@@ -134,8 +210,17 @@ def load_model(config: ModelConfig):
         try:
             # Check if the model file exists
             model_path = config.onnx_file
+            
+            # Try different paths for the model file
             if not os.path.exists(model_path):
-                raise HTTPException(status_code=404, detail=f"Model file not found: {model_path}")
+                # Try relative to detector directory
+                detector_dir = os.path.dirname(os.path.abspath(__file__))
+                alt_model_path = os.path.join(detector_dir, "model.onnx")
+                if os.path.exists(alt_model_path):
+                    model_path = alt_model_path
+                    detector_logger.info(f"Using model from detector directory: {model_path}")
+                else:
+                    raise HTTPException(status_code=404, detail=f"Model file not found: {model_path} or {alt_model_path}")
             
             # Set execution providers
             if config.device.lower() == 'gpu':
@@ -144,28 +229,35 @@ def load_model(config: ModelConfig):
                         ('CUDAExecutionProvider', {}),
                         ('CPUExecutionProvider', {})
                     ]
-                    print("Attempting GPU acceleration with CUDA")
+                    detector_logger.info("Attempting GPU acceleration with CUDA")
                 except:
                     providers = [('CPUExecutionProvider', {})]
-                    print("GPU not available, falling back to CPU")
+                    detector_logger.info("GPU not available, falling back to CPU")
             else:
                 providers = [('CPUExecutionProvider', {})]
-                print("Using CPU execution (stable and reliable)")
+                detector_logger.info("Using CPU execution (stable and reliable)")
             
             # Create ONNX Runtime session
             model_session = ort.InferenceSession(model_path, providers=providers)
             
-            # Print available providers and current device
-            print(f"Available providers: {ort.get_available_providers()}")
-            print(f"Current provider: {model_session.get_providers()}")
+            # Log available providers and current device
+            detector_logger.info(f"Available providers: {ort.get_available_providers()}")
+            detector_logger.info(f"Current provider: {model_session.get_providers()}")
             
             # Load class names
             if os.path.exists(config.categories_file):
                 class_names = load_class_names(config.categories_file)
-                print(f"Loaded {len(class_names)} class names from {config.categories_file}")
+                detector_logger.info(f"Loaded {len(class_names)} class names from {config.categories_file}")
             else:
-                print(f"Warning: Categories file not found: {config.categories_file}")
-                class_names = []
+                # Try relative to detector directory
+                detector_dir = os.path.dirname(os.path.abspath(__file__))
+                alt_categories_file = os.path.join(detector_dir, "categories.yaml")
+                if os.path.exists(alt_categories_file):
+                    class_names = load_class_names(alt_categories_file)
+                    detector_logger.info(f"Loaded {len(class_names)} class names from detector directory: {alt_categories_file}")
+                else:
+                    detector_logger.warning(f"Categories file not found: {config.categories_file} or {alt_categories_file}")
+                    class_names = []
                 
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to load model: {str(e)}")
@@ -320,21 +412,29 @@ async def detect(file: Optional[UploadFile] = None,
                 img_size: int = Form(640),
                 conf_thres: float = Form(0.6),
                 device: str = Form("cpu"),
-                categories_file: str = Form("categories.yaml")):
+                categories_file: str = Form("categories.yaml"),
+                frame_name: Optional[str] = Form(None)):
+    
+    detector_logger.info(f"Received detection request with file: {file.filename if file else 'None'}, frame_name: {frame_name}")
     
     # Read image file or use default image
     if file is not None:
         try:
             contents = await file.read()
+            detector_logger.debug(f"Successfully read file contents, size: {len(contents)} bytes")
         except Exception as e:
+            detector_logger.error(f"Error reading uploaded file: {e}")
             raise HTTPException(status_code=400, detail=f"Error reading uploaded file: {str(e)}")
     else:
         # Use default image
         default_image_path = config.paths.default_image
+        detector_logger.debug(f"No file provided, using default image: {default_image_path}")
         if os.path.exists(default_image_path):
             with open(default_image_path, 'rb') as f:
                 contents = f.read()
+            detector_logger.debug(f"Read default image, size: {len(contents)} bytes")
         else:
+            detector_logger.error(f"Default image not found: {default_image_path}")
             raise HTTPException(status_code=404, detail=f"Default image not found: {default_image_path}")
     
     # Create model config
@@ -345,13 +445,30 @@ async def detect(file: Optional[UploadFile] = None,
         device=device,
         categories_file=categories_file
     )
+    detector_logger.debug(f"Created model config: {model_config}")
     
     # Process image
+    detector_logger.info("Processing image for detection...")
     result = await process_image(contents, model_config)
+    detector_logger.info(f"Image processed, found {len(result.detections)} detections")
+    
+    # Determine image source for saving - prioritize frame_name if provided
+    if frame_name:
+        image_source = frame_name
+        detector_logger.debug(f"Using provided frame_name as image source: {image_source}")
+    elif file and file.filename:
+        image_source = file.filename
+        detector_logger.debug(f"Using file.filename as image source: {image_source}")
+    else:
+        image_source = f"detection_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]}"
+        detector_logger.debug(f"Generated timestamp as image source: {image_source}")
     
     # Save detection result if enabled
-    image_source = file.filename if file else "default_image"
-    save_detection_result(result, image_source)
+    saved_path = save_detection_result(result, image_source)
+    if saved_path:
+        detector_logger.info(f"Detection result saved to: {saved_path}")
+    else:
+        detector_logger.warning("Failed to save detection result")
     
     return result
 

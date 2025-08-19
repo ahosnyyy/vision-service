@@ -19,7 +19,14 @@ def load_clo_values(yaml_file: str = None) -> Dict[str, Any]:
         yaml_file = config.clo.values_file
     
     if not os.path.exists(yaml_file):
-        raise FileNotFoundError(f"CLO values file not found: {yaml_file}")
+        # Try relative to detector directory
+        detector_dir = os.path.dirname(os.path.abspath(__file__))
+        alt_yaml_file = os.path.join(detector_dir, "clo_values.yaml")
+        if os.path.exists(alt_yaml_file):
+            yaml_file = alt_yaml_file
+            print(f"Using CLO values from detector directory: {yaml_file}")
+        else:
+            raise FileNotFoundError(f"CLO values file not found: {yaml_file} or {alt_yaml_file}")
     
     with open(yaml_file, 'r') as f:
         clo_data = yaml.safe_load(f)

@@ -24,7 +24,11 @@ class VisionCoordinator:
     def __init__(self, config_path: str = "config.yaml"):
         """Initialize the coordinator with configuration."""
         self.config = load_config(config_path)
-        self.logger = setup_logging("coordinator")
+        
+        # Get logging configuration
+        log_level = self.config.get("logging", {}).get("level", "INFO")
+        log_file = self.config.get("logging", {}).get("file")
+        self.logger = setup_logging("coordinator", log_level, log_file)
         
         # Service components
         self.recorder: Optional[Recorder] = None
@@ -38,35 +42,34 @@ class VisionCoordinator:
         self.processing_thread: Optional[threading.Thread] = None
         
         # Configuration
-        self.detection_interval = self.config.get("detection_interval", 10)  # Process every Nth frame
+        # First try to get from detector.fps (new), then fall back to detection_interval (deprecated)
+        detector_config = self.config.get("detector", {})
+        self.detection_fps = detector_config.get("fps", self.config.get("detection_interval", 1))  # Detection FPS
         self.buffer_size = self.config.get("buffer_size", 100)
         self.processing_delay = self.config.get("processing_delay", 0.1)  # seconds
         
-        self.logger.info("Vision Coordinator initialized")
+        # Calculate detection interval based on FPS
+        self.detection_interval = 1.0 / self.detection_fps if self.detection_fps > 0 else 1.0
+        self.last_detection_time = 0
+        
+        self.logger.debug("Coordinator initialized")
     
     def start(self) -> bool:
         """Start the vision service."""
         try:
-            self.logger.info("Starting Vision Service...")
+            # Initialize shared buffer with longer timeout
+            self.frame_buffer = FrameBuffer(maxlen=self.buffer_size, timeout=5.0)
             
-            # Initialize shared buffer
-            self.frame_buffer = FrameBuffer(maxlen=self.buffer_size)
-            self.logger.info(f"Frame buffer initialized with size {self.buffer_size}")
-            
-            # Start recorder service
+            # Start recorder service (uses its own config file)
             self.recorder = Recorder(
-                config_path=self.config.get("recorder_config", "recorder/config.yaml"),
-                frame_buffer=self.frame_buffer
+                frame_buffer=self.frame_buffer,
+                detection_fps=self.detection_fps  # Pass detector FPS to recorder
             )
             self.recorder.start()
-            self.logger.info("Recorder service started")
             
-            # Start detector service
-            self.detector = Detector(
-                config_path=self.config.get("detector_config", "detector/config.yaml")
-            )
+            # Start detector service (uses its own config file)
+            self.detector = Detector()
             self.detector.start()
-            self.logger.info("Detector service started")
             
             # Start frame processing
             self.running = True
@@ -76,9 +79,7 @@ class VisionCoordinator:
                 name="FrameProcessor"
             )
             self.processing_thread.start()
-            self.logger.info("Frame processing started")
-            
-            self.logger.info("Vision Service started successfully")
+            self.logger.info("Vision Service ready")
             return True
             
         except Exception as e:
@@ -88,8 +89,8 @@ class VisionCoordinator:
     
     def stop(self) -> None:
         """Stop the vision service."""
-        self.logger.info("Stopping Vision Service...")
         self.running = False
+        self.logger.info("Stopping Vision Service")
         
         # Stop frame processing
         if self.processing_thread and self.processing_thread.is_alive():
@@ -115,41 +116,131 @@ class VisionCoordinator:
     def _process_frames(self) -> None:
         """Main frame processing loop."""
         frame_count = 0
+        last_buffer_log = 0
+        last_buffer_check = 0
+        buffer_check_interval = 1.0  # Check buffer utilization every second
+        high_utilization_threshold = 0.8  # 80% buffer capacity
         
         while self.running:
             try:
+                current_time = time.time()
+                
+                # Check buffer utilization periodically and take action if needed
+                if current_time - last_buffer_check >= buffer_check_interval:
+                    if self.frame_buffer and not self.frame_buffer.empty():
+                        buffer_stats = self.frame_buffer.get_stats()
+                        utilization = buffer_stats.get('utilization', 0)
+                        
+                        # If buffer is getting full, clear older frames more aggressively
+                        if utilization > high_utilization_threshold:
+                            self.logger.warning(f"Buffer utilization high ({utilization:.2f}), clearing older frames")
+                            # Keep only the most recent frames (e.g., last 10%)
+                            frames_to_keep = max(1, int(self.frame_buffer.maxlen * 0.1))
+                            frames_to_skip = len(self.frame_buffer) - frames_to_keep
+                            
+                            if frames_to_skip > 0:
+                                # Keep only the newest frames by removing older ones
+                                for _ in range(frames_to_skip):
+                                    if not self.frame_buffer.empty():
+                                        self.frame_buffer.get()  # Remove oldest frame
+                                    else:
+                                        break
+                                self.logger.info(f"Cleared {frames_to_skip} older frames, keeping {frames_to_keep} newest frames")
+                        
+                        # Log buffer statistics periodically
+                        self.logger.info(f"Buffer stats: size={len(self.frame_buffer)}/{self.frame_buffer.maxlen}, "
+                                        f"utilization={utilization:.2f}, pushed={buffer_stats.get('total_pushed', 0)}, "
+                                        f"popped={buffer_stats.get('total_popped', 0)}, "
+                                        f"dropped={buffer_stats.get('dropped_frames', 0)}")
+                    
+                    last_buffer_check = current_time
+                
                 if not self.frame_buffer or self.frame_buffer.empty():
+                    # Log buffer status every 5 seconds
+                    if current_time - last_buffer_log >= 5.0:
+                        self.logger.info(f"Buffer is empty. Waiting for frames...")
+                        last_buffer_log = current_time
                     time.sleep(self.processing_delay)
                     continue
                 
-                # Get frame from buffer
-                frame_data = self.frame_buffer.get()
+                # Get frame from buffer - ALWAYS use get_latest to process the freshest frame
+                buffer_stats = self.frame_buffer.get_stats() if self.frame_buffer else {}
+                utilization = buffer_stats.get('utilization', 0)
+                
+                # Always use get_latest to process the most recent frame
+                frame_data = self.frame_buffer.get_latest()
+                
+                # Log buffer pressure status periodically
+                if utilization > high_utilization_threshold:
+                    if frame_count % 10 == 0:  # Log less frequently when under pressure
+                        self.logger.warning(f"Buffer pressure: {utilization:.2f}, processing latest frame")
+                elif frame_count % 30 == 0:  # Log during normal operation
+                    self.logger.info(f"Buffer utilization: {utilization:.2f}, processing latest frame")
+                
                 if frame_data is None:
                     continue
                 
                 frame_count += 1
                 
-                # Decide whether to process this frame
-                if frame_count % self.detection_interval == 0:
-                    self.logger.debug(f"Processing frame {frame_count}")
-                    
-                    # Send frame to detector via HTTP API
-                    if self.detector and self.detector.is_ready():
-                        try:
-                            detection_result = self.detector.detect_frame(frame_data)
-                            if detection_result:
-                                self.logger.info(f"Detection completed for frame {frame_count}")
-                                # Handle detection results here
-                        except Exception as e:
-                            self.logger.error(f"Detection failed for frame {frame_count}: {e}")
-                    else:
-                        self.logger.warning("Detector not ready, skipping frame")
+                # Extract frame data and name
+                if isinstance(frame_data, tuple) and len(frame_data) == 2:
+                    frame, frame_name = frame_data
+                    self.logger.debug(f"Frame name from buffer: {frame_name}")
+                else:
+                    frame = frame_data
+                    # Generate a more unique frame name with timestamp
+                    from datetime import datetime
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+                    frame_name = f"frame_{timestamp}.jpg"  # More unique fallback name
+                    self.logger.debug(f"Generated frame name: {frame_name}")
                 
-                # Small delay to prevent excessive CPU usage
-                time.sleep(self.processing_delay)
+                # Log frame received less frequently to reduce log volume
+                if frame_count % 30 == 0:
+                    buffer_stats = self.frame_buffer.get_stats() if self.frame_buffer else {}
+                    self.logger.info(f"Received frame {frame_count} ({frame_name}) from buffer. Buffer size: {len(self.frame_buffer)}")
+                    self.logger.info(f"Buffer stats: {buffer_stats}")
+                
+                # Process frame
+                self.logger.info(f"Processing frame {frame_count} ({frame_name}) at {self.detection_fps} FPS")
+                
+                # Send frame to detector via HTTP API
+                if self.detector and self.detector.is_ready():
+                    try:
+                        # Ensure frame_name is passed correctly
+                        self.logger.debug(f"Sending frame {frame_name} to detector")
+                        detection_result = self.detector.detect_frame(frame, frame_name)
+                        
+                        if detection_result:
+                            num_detections = len(detection_result.get('detections', []))
+                            self.logger.info(f"Detection completed for frame {frame_count} ({frame_name}): {num_detections} objects detected")
+                            
+                            # Log more details about detection results only when objects are detected
+                            if num_detections > 0:
+                                self.logger.info(f"Detection details: {detection_result}")
+                        else:
+                            self.logger.warning(f"No detection result returned for frame {frame_name}")
+                    except Exception as e:
+                        self.logger.error(f"Detection failed for frame {frame_count} ({frame_name}): {e}")
+                        import traceback
+                        self.logger.error(f"Traceback: {traceback.format_exc()}")
+                else:
+                    self.logger.warning("Detector not ready, skipping frame")
+                
+                # Update last detection time
+                self.last_detection_time = current_time
+                
+                # Adaptive delay based on buffer utilization
+                if utilization < 0.3:  # Buffer is relatively empty
+                    # Process faster to catch up
+                    time.sleep(max(0.001, self.processing_delay * 0.5))
+                else:
+                    # Normal processing delay
+                    time.sleep(self.processing_delay)
                 
             except Exception as e:
                 self.logger.error(f"Error in frame processing loop: {e}")
+                import traceback
+                self.logger.error(f"Traceback: {traceback.format_exc()}")
                 time.sleep(self.processing_delay)
     
     def get_status(self) -> Dict[str, Any]:
@@ -160,7 +251,8 @@ class VisionCoordinator:
             "detector_active": self.detector.is_running() if self.detector else False,
             "buffer_size": len(self.frame_buffer) if self.frame_buffer else 0,
             "buffer_capacity": self.buffer_size,
-            "detection_interval": self.detection_interval
+            "detection_fps": self.detection_fps,
+            "detection_interval_seconds": self.detection_interval
         }
         return status
     

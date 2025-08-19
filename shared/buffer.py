@@ -35,12 +35,13 @@ class FrameBuffer:
         self._total_popped = 0
         self._dropped_frames = 0
     
-    def put(self, frame: Any, block: bool = True, timeout: Optional[float] = None) -> bool:
+    def put(self, frame: Any, frame_name: str = None, block: bool = True, timeout: Optional[float] = None) -> bool:
         """
         Add a frame to the buffer.
         
         Args:
             frame: Frame data to add
+            frame_name: Optional name for the frame (for JSON naming)
             block: Whether to block if buffer is full
             timeout: Timeout for blocking operation
             
@@ -60,9 +61,10 @@ class FrameBuffer:
                         return False
                     self._not_full.wait(remaining_time)
             
-            # Add frame
+            # Add frame with name as tuple
+            frame_data = (frame, frame_name) if frame_name else frame
             if len(self._buffer) < self.maxlen:
-                self._buffer.append(frame)
+                self._buffer.append(frame_data)
                 self._total_pushed += 1
                 self._not_empty.notify()
                 return True
@@ -110,6 +112,40 @@ class FrameBuffer:
             if len(self._buffer) > 0:
                 return self._buffer[0]
             return None
+    
+    def get_latest(self, block: bool = True, timeout: Optional[float] = None) -> Optional[Any]:
+        """
+        Get the most recent frame from the buffer (LIFO - Last In, First Out).
+        This ensures we always process the freshest frame.
+        
+        Args:
+            block: Whether to block if buffer is empty
+            timeout: Timeout for blocking operation
+            
+        Returns:
+            Most recent frame data or None if timeout/empty
+        """
+        if timeout is None:
+            timeout = self.timeout
+            
+        with self._lock:
+            if block:
+                # Wait for frame to become available
+                end_time = time.time() + timeout
+                while len(self._buffer) == 0:
+                    remaining_time = end_time - time.time()
+                    if remaining_time <= 0:
+                        return None
+                    self._not_empty.wait(remaining_time)
+            
+            # Get most recent frame (from the right end of deque)
+            if len(self._buffer) > 0:
+                frame = self._buffer.pop()  # Get last (newest) frame
+                self._total_popped += 1
+                self._not_full.notify()
+                return frame
+            else:
+                return None
     
     def clear(self) -> None:
         """Clear all frames from the buffer."""

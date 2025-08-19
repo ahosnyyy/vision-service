@@ -28,7 +28,7 @@ def setup_logging(
     Args:
         name: Logger name
         level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-        log_file: Optional log file path
+        log_file: Optional log file path (None to disable file logging)
         format_string: Optional custom format string
         
     Returns:
@@ -45,12 +45,12 @@ def setup_logging(
     log_level = getattr(logging, level.upper(), logging.INFO)
     logger.setLevel(log_level)
     
-    # Default format
+    # Default format with timestamp and level
     if format_string is None:
         format_string = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     
-    # Create formatter
-    formatter = logging.Formatter(format_string)
+    # Create formatter with ISO8601 timestamp format
+    formatter = logging.Formatter(format_string, "%Y-%m-%d %H:%M:%S")
     
     # Console handler
     console_handler = logging.StreamHandler(sys.stdout)
@@ -59,15 +59,17 @@ def setup_logging(
     logger.addHandler(console_handler)
     
     # File handler (if specified)
-    if log_file:
-        # Create log directory if it doesn't exist
-        log_path = Path(log_file)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setLevel(log_level)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
+    if log_file and log_file.lower() != 'none' and log_file != 'null':
+        # No directory creation - assume file path is valid or use current directory
+        try:
+            file_handler = logging.FileHandler(log_file)
+            file_handler.setLevel(log_level)
+            file_handler.setFormatter(formatter)
+            logger.addHandler(file_handler)
+        except (IOError, PermissionError) as e:
+            # Log to console if file logging fails
+            console_handler.setLevel(logging.WARNING)
+            logger.warning(f"Could not set up log file '{log_file}': {e}")
     
     return logger
 
