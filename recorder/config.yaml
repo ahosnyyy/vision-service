@@ -7,4 +7,4 @@ recorder:
   image_format: "jpg"        # jpg / png
   output_dir: "./frames"     # where to store raw frames
   buffer_size: 100           # max number of frames in memory buffer
-  keep_disk_copy: false      # whether to save every frame to disk or not
+  keep_disk_copy: true      # whether to save every frame to disk or not
