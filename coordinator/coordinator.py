@@ -52,6 +52,15 @@ class VisionCoordinator:
         self.detection_interval = 1.0 / self.detection_fps if self.detection_fps > 0 else 1.0
         self.last_detection_time = 0
         
+        # Store latest detection results for UI
+        self.last_detection_result = None
+        self.last_detection_frame = None  # Store the frame that was sent to detection
+        self.detection_stats = {
+            'total_detections': 0,
+            'last_detection_time': None,
+            'detection_counts': {}
+        }
+        
         self.logger.debug("Coordinator initialized")
     
     def start(self) -> bool:
@@ -211,7 +220,22 @@ class VisionCoordinator:
                         detection_result = self.detector.detect_frame(frame, frame_name)
                         
                         if detection_result:
+                            # Store latest detection result and frame for UI
+                            self.last_detection_result = detection_result
+                            self.last_detection_frame = frame  # Store the frame that was sent to detection
+                            self.detection_stats['last_detection_time'] = current_time
+                            
                             num_detections = len(detection_result.get('detections', []))
+                            self.detection_stats['total_detections'] += num_detections
+                            
+                            # Update detection counts by class
+                            for det in detection_result.get('detections', []):
+                                # Try different possible keys for class name
+                                class_name = det.get('class') or det.get('class_name') or det.get('label') or det.get('name') or 'unknown'
+                                if class_name not in self.detection_stats['detection_counts']:
+                                    self.detection_stats['detection_counts'][class_name] = 0
+                                self.detection_stats['detection_counts'][class_name] += 1
+                            
                             self.logger.info(f"Detection completed for frame {frame_count} ({frame_name}): {num_detections} objects detected")
                             
                             # Log more details about detection results only when objects are detected

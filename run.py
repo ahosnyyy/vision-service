@@ -168,6 +168,12 @@ Examples:
         action="version",
         version="Vision Service v1.0.0"
     )
+
+    parser.add_argument(
+        "--ui",
+        action="store_true",
+        help="Launch the Gradio monitoring UI"
+    )
     
     args = parser.parse_args()
     
@@ -199,6 +205,31 @@ Examples:
         
         # Setup signal handlers for graceful shutdown
         setup_signal_handlers(coordinator)
+
+        # Launch UI if requested
+        if args.ui:
+            try:
+                from ui.app import create_ui
+                import threading
+                
+                logger.info("Launching Gradio UI...")
+                
+                # The UI needs access to the coordinator to get data
+                ui_app = create_ui(coordinator) 
+                
+                # Run Gradio in a separate thread
+                ui_thread = threading.Thread(
+                    target=lambda: ui_app.launch(server_name="0.0.0.0", server_port=7860, share=False),
+                    daemon=True
+                )
+                ui_thread.start()
+                logger.info("UI is running at http://localhost:7860")
+
+            except ImportError:
+                logger.error("UI dependencies are not installed. Please run:")
+                logger.error("pip install -r ui/requirements.txt")
+            except Exception as e:
+                logger.error(f"Failed to launch UI: {e}")
         
         # Start the service
         if not coordinator.start():
